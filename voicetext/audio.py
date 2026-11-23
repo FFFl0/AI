@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import subprocess
@@ -16,16 +17,67 @@ HOP_LENGTH = 160  # 10 мс шаг -> 100 кадров признаков в с�
 N_MELS = 80
 
 
-def load_audio(path: str, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+_LANG3 = {"ru": "rus", "en": "eng", "uk": "ukr", "de": "ger", "fr": "fre", "es": "spa", "it": "ita", "ja": "jpn"}
+
+
+def probe_audio_streams(path: str) -> list[dict]:
+    """Список звуковых дорожек файла: [{"channels", "layout", "language", "title"}, ...]."""
+    if shutil.which("ffprobe") is None:
+        return []
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+         "stream=channels,channel_layout:stream_tags=language,title", "-of", "json", path],
+        capture_output=True, text=True,
+    )
+    try:
+        streams = json.loads(proc.stdout).get("streams", [])
+    except json.JSONDecodeError:
+        return []
+    return [
+        {"channels": s.get("channels", 0), "layout": s.get("channel_layout", ""),
+         "language": s.get("tags", {}).get("language", ""), "title": s.get("tags", {}).get("title", "")}
+        for s in streams
+    ]
+
+
+def select_audio_track(streams: list[dict], track: int | str | None) -> int:
+    """track: номер дорожки (0, 1, ...) или язык ("ru", "rus", "en"). None — первая дорожка."""
+    if track is None or not streams:
+        return 0
+    if isinstance(track, int) or str(track).isdigit():
+        idx = int(track)
+        if idx >= len(streams):
+            raise RuntimeError(f"Нет звуковой дорожки №{idx}, в файле их {len(streams)}")
+        return idx
+    want = _LANG3.get(str(track).lower(), str(track).lower())
+    for i, s in enumerate(streams):
+        if s["language"].lower() in (want, str(track).lower()):
+            return i
+    found = ", ".join(f"{i}: {s['language'] or '?'} {s['title']}".strip() for i, s in enumerate(streams))
+    raise RuntimeError(f"Не найдена звуковая дорожка на языке {track!r}. Есть: {found}")
+
+
+def load_audio(path: str, sample_rate: int = SAMPLE_RATE, track: int | str | None = None,
+               dialog: bool = True) -> np.ndarray:
     """Достаёт звуковую дорожку из любого видео/аудио файла через ffmpeg.
 
+    track  — какую дорожку брать (номер или язык, важно для фильмов с дубляжом и оригиналом).
+    dialog — для объёмного звука (5.1/7.1) брать центральный канал: в фильмах там
+             почти всегда диалоги, а музыка и эффекты — в остальных каналах.
     Возвращает моно-сигнал float32 в диапазоне [-1, 1] с частотой sample_rate.
     """
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg не найден. Установите его: https://ffmpeg.org/download.html")
+    streams = probe_audio_streams(path)
+    idx = select_audio_track(streams, track)
+    mix = ["-ac", "1"]
+    if dialog and streams and streams[idx]["channels"] >= 6:
+        # Стандартный порядок каналов 5.1/7.1: FL FR FC LFE ... — центр третий.
+        center = "FC" if "FC" in _layout_channels(streams[idx]["layout"]) else "c2"
+        mix = ["-af", f"pan=mono|c0={center}"]
     cmd = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-        "-i", path, "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-",
+        "-i", path, "-map", f"0:a:{idx}", "-vn", *mix, "-ar", str(sample_rate), "-f", "s16le", "-",
     ]
     proc = subprocess.run(cmd, capture_output=True)
     if proc.returncode != 0:
@@ -33,6 +85,12 @@ def load_audio(path: str, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     if not proc.stdout:
         raise RuntimeError(f"В файле {path} нет звуковой дорожки")
     return np.frombuffer(proc.stdout, np.int16).astype(np.float32) / 32768.0
+
+
+def _layout_channels(layout: str) -> set[str]:
+    named = {"5.1": "FL FR FC LFE BL BR", "5.1(side)": "FL FR FC LFE SL SR", "6.1": "FL FR FC LFE BC SL SR",
+             "7.1": "FL FR FC LFE BL BR SL SR", "7.1(wide)": "FL FR FC LFE BL BR FLC FRC"}
+    return set(named.get(layout, "").split())
 
 
 def _hz_to_mel(hz: np.ndarray) -> np.ndarray:

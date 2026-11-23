@@ -48,8 +48,8 @@ class Transcriber:
             ],
         }
 
-    def transcribe_file(self, path: str, language: str | None = None) -> dict:
-        result = self.transcribe_array(load_audio(path), language)
+    def transcribe_file(self, path: str, language: str | None = None, audio_track=None, dialog: bool = True) -> dict:
+        result = self.transcribe_array(load_audio(path, track=audio_track, dialog=dialog), language)
         return {"file": os.path.basename(path), **result}
 
 

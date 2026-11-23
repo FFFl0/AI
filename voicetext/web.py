@@ -16,10 +16,13 @@ def build_app(checkpoint: str, device: str = "auto"):
     transcriber = Transcriber(checkpoint, device)
     out_root = tempfile.mkdtemp(prefix="voicetext_")
 
-    def run(video_path, formats):
+    def run(video_path, formats, audio_track):
         if not video_path:
             raise gr.Error("Загрузите видео или аудио файл")
-        result = transcriber.transcribe_file(video_path)
+        try:
+            result = transcriber.transcribe_file(video_path, audio_track=(audio_track or "").strip() or None)
+        except RuntimeError as e:
+            raise gr.Error(str(e))
         files = save_result(result, video_path, out_root, formats or ["json", "srt", "vtt"])
         lang = result["language"] or "не определён"
         info = f"Язык: {lang} · длительность: {result['duration']:.1f} с · фраз: {len(result['segments'])}"
@@ -33,12 +36,14 @@ def build_app(checkpoint: str, device: str = "auto"):
                 video = gr.File(label="Видео или аудио", type="filepath")
                 formats = gr.CheckboxGroup(["json", "srt", "vtt", "txt"], value=["json", "srt", "vtt"],
                                            label="Форматы результата")
+                audio_track = gr.Textbox(label="Звуковая дорожка (необязательно)",
+                                         placeholder="номер (0, 1…) или язык: ru, en")
                 btn = gr.Button("Распознать", variant="primary")
             with gr.Column():
                 text = gr.Textbox(label="Текст", lines=12)
                 info = gr.Markdown()
                 files = gr.File(label="Файлы", file_count="multiple")
-        btn.click(run, [video, formats], [text, info, files])
+        btn.click(run, [video, formats, audio_track], [text, info, files])
     return app
 
 

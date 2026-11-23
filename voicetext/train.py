@@ -56,6 +56,8 @@ def train(
     workers: int = 4,
     device: str = "auto",
     resume: str | None = None,
+    init: str | None = None,
+    noise_dir: str | None = None,
     dropout: float = 0.1,
     augment: bool = True,
     seed: int = 0,
@@ -66,7 +68,7 @@ def train(
     os.makedirs(out_dir, exist_ok=True)
     tokenizer = Tokenizer()
 
-    train_ds = SpeechDataset(train_manifest, tokenizer, augment=augment)
+    train_ds = SpeechDataset(train_manifest, tokenizer, augment=augment, noise_dir=noise_dir)
     sampler = DurationBatchSampler(train_ds.items, batch_seconds)
     train_dl = DataLoader(train_ds, batch_sampler=sampler, collate_fn=collate, num_workers=workers,
                           persistent_workers=workers > 0)
@@ -82,6 +84,14 @@ def train(
         tokenizer = Tokenizer(ckpt["vocab"])
         model.train()
         start_epoch, step, best = ckpt.get("epoch", 0), ckpt.get("step", 0), ckpt.get("best", math.inf)
+    elif init:
+        # Дообучение: берём веса готовой модели (например, обученной на Common Voice),
+        # а оптимизатор и расписание learning rate начинаем заново.
+        model, ckpt = load_checkpoint(init, device)
+        if ckpt["vocab"] != tokenizer.vocab:
+            raise ValueError("Словарь модели из --init не совпадает с текущим")
+        model.train()
+        ckpt = {}
     else:
         cfg = ModelConfig.from_preset(size, len(tokenizer), dropout=dropout)
         model = SpeechRecognizer(cfg).to(device)

@@ -82,3 +82,68 @@ def test_model_shapes_and_checkpoint(tmp_path):
     model.eval()
     with torch.no_grad():
         assert torch.allclose(loaded(feats, torch.tensor([101, 50]))[0], model(feats, torch.tensor([101, 50]))[0])
+
+
+# ---------- фильмы: субтитры, дорожки, аугментации ----------
+
+from voicetext.audio import select_audio_track
+from voicetext.data import mix_noise, speed_perturb
+from voicetext.subtitles import Cue, clean_cue_text, merge_cues, parse_srt
+
+SRT = """1
+00:00:01,000 --> 00:00:02,500
+<i>Привет!</i>
+
+2
+00:00:02,700 --> 00:00:04,000
+- Как дела?
+- ИВАН: Нормально.
+
+3
+00:01:00,000 --> 00:01:03,000
+♪ Ля-ля-ля ♪
+
+4
+00:01:10,000 --> 00:01:12,000
+[музыка] (смеётся) Ну давай
+"""
+
+
+def test_parse_and_clean_srt():
+    cues = parse_srt(SRT)
+    assert len(cues) == 4 and cues[0].start == 1.0 and cues[3].end == 72.0
+    assert clean_cue_text(cues[0].text) == "Привет!"
+    assert clean_cue_text(cues[1].text) == "Как дела? Нормально."
+    assert clean_cue_text(cues[2].text) is None
+    assert clean_cue_text(cues[3].text) == "Ну давай"
+    vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello\n"
+    assert parse_srt(vtt)[0].text == "hello"
+
+
+def test_merge_cues():
+    cues = [Cue(1, 2, "a"), Cue(2.2, 3, "b"), Cue(10, 11, "c")]
+    assert [c.text for c in merge_cues(cues)] == ["a b", "c"]
+    assert len(merge_cues([Cue(0, 9, "a"), Cue(9.1, 18, "b")], max_duration=15)) == 2
+
+
+def test_select_audio_track():
+    streams = [{"channels": 6, "layout": "5.1", "language": "rus", "title": ""},
+               {"channels": 2, "layout": "stereo", "language": "eng", "title": ""}]
+    assert select_audio_track(streams, None) == 0
+    assert select_audio_track(streams, "en") == 1
+    assert select_audio_track(streams, "1") == 1
+    try:
+        select_audio_track(streams, "de")
+        assert False
+    except RuntimeError as e:
+        assert "eng" in str(e)
+
+
+def test_noise_mix_snr_and_speed():
+    rng = np.random.default_rng(0)
+    speech = rng.normal(0, 0.1, 16000).astype(np.float32)
+    noise = rng.normal(0, 0.5, 16000).astype(np.float32)
+    mixed = mix_noise(speech, noise, snr_db=10)
+    added = mixed - speech
+    assert abs(10 * np.log10(np.mean(speech**2) / np.mean(added**2)) - 10) < 0.01
+    assert len(speed_perturb(speech, 1.1)) == int(16000 / 1.1)

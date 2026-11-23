@@ -74,6 +74,43 @@ def from_jsonl(path: str, audio_key: str = "audio", text_key: str = "text") -> l
     return items
 
 
+def from_subtitles(folder: str, out_dir: str, lang: str | None = None, audio_track=None, sub_track=None,
+                   skip_digits: bool = True, shift: float = 0.0) -> list[dict]:
+    """Фильмы/сериалы с субтитрами: режет звук по репликам в out_dir/clips."""
+    from voicetext.subtitles import cut_clips, find_subtitles
+    from voicetext.tokenizer import Tokenizer
+
+    tok = Tokenizer()
+    videos = [folder] if os.path.isfile(folder) else [
+        os.path.join(r, n) for r, _, fs in os.walk(folder) for n in sorted(fs)
+        if os.path.splitext(n)[1].lower() in AUDIO_EXT - {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a"}
+    ]
+    items = []
+    for video in videos:
+        subs = find_subtitles(video, lang)
+        if subs is None and sub_track is None and not _has_subtitle_stream(video):
+            print(f"[prepare] {os.path.basename(video)}: нет субтитров, пропускаю", file=sys.stderr)
+            continue
+        try:
+            clips, st = cut_clips(video, subs, os.path.join(out_dir, "clips"), tok.normalize, audio_track,
+                                  sub_track, skip_digits=skip_digits, shift=shift)
+        except RuntimeError as e:
+            print(f"[prepare] {os.path.basename(video)}: {e}", file=sys.stderr)
+            continue
+        minutes = sum(c["duration"] for c in clips) / 60
+        print(f"[prepare] {os.path.basename(video)}: {len(clips)} фраз ({minutes:.0f} мин) из {st['cues']} реплик; "
+              f"отброшено: текст {st['dropped_text']}, цифры {st['dropped_digits']}, "
+              f"длина {st['dropped_length']}, тайминг {st['dropped_rate']}", file=sys.stderr)
+        items += clips
+    return items
+
+
+def _has_subtitle_stream(video: str) -> bool:
+    proc = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index",
+                           "-of", "csv=p=0", video], capture_output=True, text=True)
+    return bool(proc.stdout.strip())
+
+
 def finalize(items: list[dict], out_dir: str, convert: bool, workers: int, val_fraction: float,
              seed: int = 0) -> None:
     """Опционально конвертирует в WAV 16 кГц (ускоряет обучение), считает длительности,
@@ -90,7 +127,8 @@ def finalize(items: list[dict], out_dir: str, convert: bool, workers: int, val_f
             if not os.path.exists(dst):
                 to_wav16k(src, dst)
             item = {**item, "audio": dst}
-        dur = probe_duration(item["audio"])
+        dur = item.get("duration") if not convert else None
+        dur = dur or probe_duration(item["audio"])
         return {**item, "duration": dur} if dur else None
 
     total = len(items)
@@ -103,10 +141,20 @@ def finalize(items: list[dict], out_dir: str, convert: bool, workers: int, val_f
                 print(f"\r[prepare] {n}/{total}", end="", file=sys.stderr)
     print(file=sys.stderr)
 
-    random.Random(seed).shuffle(done)
-    n_val = int(len(done) * val_fraction)
+    rng = random.Random(seed)
+    groups = sorted({it["group"] for it in done if "group" in it})
+    if len(groups) >= 2 and val_fraction > 0:
+        # Делим по фильмам/сериям: проверка на голосах и сценах, которых модель не слышала.
+        rng.shuffle(groups)
+        val_groups = set(groups[: max(1, round(len(groups) * val_fraction))])
+        val = [it for it in done if it.get("group") in val_groups]
+        train = [it for it in done if it.get("group") not in val_groups]
+    else:
+        rng.shuffle(done)
+        n_val = int(len(done) * val_fraction)
+        val, train = done[:n_val], done[n_val:]
     hours = sum(it["duration"] for it in done) / 3600
-    if n_val:
-        write_manifest(os.path.join(out_dir, "val.jsonl"), done[:n_val])
-    write_manifest(os.path.join(out_dir, "train.jsonl"), done[n_val:])
-    print(f"[prepare] готово: {len(done) - n_val} train, {n_val} val, всего {hours:.2f} ч ({hours * 60:.1f} мин) аудио -> {out_dir}")
+    if val:
+        write_manifest(os.path.join(out_dir, "val.jsonl"), val)
+    write_manifest(os.path.join(out_dir, "train.jsonl"), train)
+    print(f"[prepare] готово: {len(train)} train, {len(val)} val, всего {hours:.2f} ч ({hours * 60:.1f} мин) аудио -> {out_dir}")

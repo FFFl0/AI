@@ -2,7 +2,8 @@
 
   transcribe  — распознать видео/аудио (файлы или папки)
   train       — обучить свою модель
-  prepare     — подготовить обучающие данные (манифесты)
+  prepare     — подготовить обучающие данные (манифесты), в т.ч. из фильмов с субтитрами
+  filter      — отсеять обучающие пары, где текст не совпадает с речью
   web         — запустить веб-интерфейс
 """
 
@@ -36,7 +37,7 @@ def cmd_transcribe(a):
     for path in files:
         print(f"[transcribe] {path}", file=sys.stderr)
         try:
-            result = tr.transcribe_file(path, a.language)
+            result = tr.transcribe_file(path, a.language, audio_track=a.audio_track, dialog=not a.full_mix)
         except RuntimeError as e:
             print(f"  ошибка: {e}", file=sys.stderr)
             continue
@@ -51,7 +52,8 @@ def cmd_train(a):
 
     best = train(a.train, a.out, a.val, size=a.size, epochs=a.epochs, batch_seconds=a.batch_seconds, lr=a.lr,
                  warmup_steps=a.warmup, grad_accum=a.grad_accum, workers=a.workers, device=a.device,
-                 resume=a.resume, dropout=a.dropout, augment=not a.no_augment, log_every=a.log_every)
+                 resume=a.resume, init=a.init, noise_dir=a.noise_dir, dropout=a.dropout,
+                 augment=not a.no_augment, log_every=a.log_every)
     print(f"[train] лучшая модель: {best}")
 
 
@@ -64,12 +66,21 @@ def cmd_prepare(a):
         items = []
         for split in a.splits:
             items += prepare.from_common_voice(a.path, split)
+    elif a.source == "subtitles":
+        items = prepare.from_subtitles(a.path, a.out, lang=a.sub_lang, audio_track=a.audio_track,
+                                       sub_track=a.sub_track, skip_digits=not a.keep_digits, shift=a.sub_shift)
     else:
         items = prepare.from_jsonl(a.path, a.audio_key, a.text_key)
     if a.limit:
         items = items[: a.limit]
     print(f"[prepare] найдено {len(items)} примеров", file=sys.stderr)
     prepare.finalize(items, a.out, convert=a.convert, workers=a.workers, val_fraction=a.val_fraction)
+
+
+def cmd_filter(a):
+    from voicetext.filter import filter_manifest
+
+    filter_manifest(a.manifest, a.model, a.out, a.max_cer, a.device, a.workers)
 
 
 def cmd_web(a):
@@ -89,6 +100,9 @@ def main(argv: list[str] | None = None):
     t.add_argument("-f", "--formats", nargs="+", default=["json", "srt", "vtt"], choices=["json", "srt", "vtt", "txt"])
     t.add_argument("-l", "--language", default=None, help="язык (по умолчанию — автоопределение)")
     t.add_argument("--device", default="auto", help="auto | cpu | cuda | mps")
+    t.add_argument("-a", "--audio-track", default=None, help="звуковая дорожка: номер (0, 1...) или язык (ru, en)")
+    t.add_argument("--full-mix", action="store_true",
+                   help="для 5.1/7.1 брать полный микс вместо центрального канала с диалогами")
     t.add_argument("--print", action="store_true", help="вывести текст в консоль")
     t.set_defaults(func=cmd_transcribe)
 
@@ -106,13 +120,21 @@ def main(argv: list[str] | None = None):
     tr.add_argument("--workers", type=int, default=4)
     tr.add_argument("--device", default="auto")
     tr.add_argument("--resume", help="продолжить обучение с чекпоинта (last.pt)")
+    tr.add_argument("--init", help="дообучить готовую модель (веса из .pt, обучение с начала)")
+    tr.add_argument("--noise-dir", help="папка с шумами/музыкой для аугментации (MUSAN и т.п.)")
     tr.add_argument("--no-augment", action="store_true", help="отключить аугментации")
     tr.add_argument("--log-every", type=int, default=50)
     tr.set_defaults(func=cmd_train)
 
     pr = sub.add_parser("prepare", help="подготовить обучающие данные")
-    pr.add_argument("source", choices=["folder", "common_voice", "jsonl"])
-    pr.add_argument("path", help="папка с данными или JSONL")
+    pr.add_argument("source", choices=["folder", "common_voice", "jsonl", "subtitles"],
+                    help="subtitles — фильмы/сериалы с субтитрами")
+    pr.add_argument("path", help="папка с данными (или файл фильма / JSONL)")
+    pr.add_argument("--audio-track", default=None, help="subtitles: звуковая дорожка — номер или язык (ru)")
+    pr.add_argument("--sub-track", type=int, default=None, help="subtitles: номер встроенной дорожки субтитров")
+    pr.add_argument("--sub-lang", default=None, help="subtitles: искать film.<lang>.srt (например ru)")
+    pr.add_argument("--sub-shift", type=float, default=0.0, help="subtitles: сдвиг субтитров, секунд")
+    pr.add_argument("--keep-digits", action="store_true", help="subtitles: не выбрасывать реплики с цифрами")
     pr.add_argument("--out", default="data", help="куда писать train.jsonl / val.jsonl")
     pr.add_argument("--splits", nargs="+", default=["train", "dev"], help="для common_voice")
     pr.add_argument("--audio-key", default="audio")
@@ -122,6 +144,15 @@ def main(argv: list[str] | None = None):
     pr.add_argument("--limit", type=int, default=0)
     pr.add_argument("--workers", type=int, default=8)
     pr.set_defaults(func=cmd_prepare)
+
+    fl = sub.add_parser("filter", help="отсеять пары, где текст не совпадает с речью")
+    fl.add_argument("manifest", help="манифест для проверки (train.jsonl)")
+    fl.add_argument("-m", "--model", required=True)
+    fl.add_argument("-o", "--out", required=True, help="куда записать очищенный манифест")
+    fl.add_argument("--max-cer", type=float, default=0.4, help="максимальная ошибка по символам (0.4 = 40%%)")
+    fl.add_argument("--device", default="auto")
+    fl.add_argument("--workers", type=int, default=4)
+    fl.set_defaults(func=cmd_filter)
 
     w = sub.add_parser("web", help="веб-интерфейс в браузере")
     w.add_argument("-m", "--model", default="checkpoints/best.pt")

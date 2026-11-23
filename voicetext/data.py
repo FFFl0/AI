@@ -39,7 +39,12 @@ def write_manifest(path: str, items: list[dict]) -> None:
     os.makedirs(base, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         for item in items:
-            item = {**item, "audio": os.path.relpath(os.path.abspath(item["audio"]), base)}
+            audio = os.path.abspath(item["audio"])
+            try:
+                audio = os.path.relpath(audio, base)
+            except ValueError:  # Windows: аудио на другом диске — оставляем полный путь
+                pass
+            item = {**item, "audio": audio}
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 

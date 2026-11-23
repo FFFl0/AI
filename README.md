@@ -99,13 +99,13 @@ pip install -r requirements-web.txt    # плюс веб-интерфейс
 Сначала модель учится понимать речь вообще. Возьмите как можно больше часов:
 **Golos** (crowd + farfield), **Common Voice ru**, разделы **Russian Open STT** с YouTube,
 аудиокнигами и выступлениями (ближе всего к фильмам). Для шумоустойчивости скачайте
-**MUSAN** (openslr.org/17: музыка, шумы, фоновые разговоры) и перекодируйте его в WAV 16 кГц моно.
+**MUSAN** (openslr.org/17: музыка, шумы, фоновые разговоры). Он уже в WAV 16 кГц, перекодировать не нужно.
 
 ```bash
-python -m voicetext prepare jsonl golos/train/manifest.jsonl --out data/golos --convert
+python -m voicetext prepare jsonl golos/train/manifest.jsonl --audio-key audio_filepath --out data/golos --convert
 python -m voicetext prepare common_voice cv-corpus/ru --out data/cv --convert
-cat data/golos/train.jsonl data/cv/train.jsonl > data/base_train.jsonl
-cat data/golos/val.jsonl   data/cv/val.jsonl   > data/base_val.jsonl
+python -m voicetext merge data/golos/train.jsonl data/cv/train.jsonl -o data/base_train.jsonl
+python -m voicetext merge data/golos/val.jsonl data/cv/val.jsonl -o data/base_val.jsonl
 
 python -m voicetext train --train data/base_train.jsonl --val data/base_val.jsonl \
     --size medium --batch-seconds 400 --grad-accum 2 --epochs 40 \
@@ -145,7 +145,8 @@ python -m voicetext filter data/films/train.jsonl -m checkpoints/base/best.pt \
     -o data/films/clean.jsonl --max-cer 0.4
 
 # 2. дообучение на фильмах + часть исходных данных, чтобы модель не «забыла» общую речь
-shuf -n 100000 data/base_train.jsonl | cat - data/films/clean.jsonl > data/ft_train.jsonl
+python -m voicetext merge data/base_train.jsonl --sample 100000 -o data/base_part.jsonl
+python -m voicetext merge data/base_part.jsonl data/films/clean.jsonl -o data/ft_train.jsonl
 python -m voicetext train --train data/ft_train.jsonl --val data/films/val.jsonl \
     --init checkpoints/base/best.pt --lr 3e-4 --warmup 500 --epochs 15 \
     --batch-seconds 400 --grad-accum 2 --noise-dir musan_16k/ --out checkpoints/films

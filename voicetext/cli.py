@@ -83,6 +83,23 @@ def cmd_filter(a):
     filter_manifest(a.manifest, a.model, a.out, a.max_cer, a.device, a.workers)
 
 
+def cmd_merge(a):
+    import random
+
+    from voicetext.data import read_manifest, write_manifest
+
+    out = []
+    for path in a.manifests:
+        items = read_manifest(path)
+        if a.sample and len(items) > a.sample:
+            items = random.Random(0).sample(items, a.sample)
+        out += items
+        print(f"[merge] {path}: {len(items)}", file=sys.stderr)
+    write_manifest(a.out, out)
+    hours = sum(it.get("duration", 0) for it in out) / 3600
+    print(f"[merge] всего {len(out)} фраз, {hours:.1f} ч -> {a.out}", file=sys.stderr)
+
+
 def cmd_web(a):
     from voicetext.web import serve
 
@@ -153,6 +170,12 @@ def main(argv: list[str] | None = None):
     fl.add_argument("--device", default="auto")
     fl.add_argument("--workers", type=int, default=4)
     fl.set_defaults(func=cmd_filter)
+
+    mg = sub.add_parser("merge", help="объединить несколько манифестов в один")
+    mg.add_argument("manifests", nargs="+")
+    mg.add_argument("-o", "--out", required=True)
+    mg.add_argument("--sample", type=int, default=0, help="взять из каждого не больше N случайных фраз")
+    mg.set_defaults(func=cmd_merge)
 
     w = sub.add_parser("web", help="веб-интерфейс в браузере")
     w.add_argument("-m", "--model", default="checkpoints/best.pt")
